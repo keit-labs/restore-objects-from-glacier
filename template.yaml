@@ -1,0 +1,114 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Stepfunction to restore objects from the DEEP_ARCHIVE or GLACIER storage type to STANDARD
+  This was created as using a Inventory Report is incredibly slow and can be done in 
+  a min time of 24 hours for initial report generation
+
+Parameters:
+  ResultsBucketExpiration:
+    Type: Number
+    Description: Lifecycle rule to expire objects from where the Stepfunction writes its logs
+    Default: 28
+
+Resources:
+  ResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      AccessControl: Private
+      LifecycleConfiguration:
+        Rules:
+          - Id: Bucket
+            Status: Enabled
+            ExpirationInDays: !Ref ResultsBucketExpiration
+
+  GlacierMoverStepfunction:
+    Type: AWS::Serverless::StateMachine # More info about State Machine Resource: https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-resource-statemachine.html
+    Properties:
+      Role: !GetAtt StepfunctionRole.Arn
+      DefinitionUri: statemachines/machine_def.asl.json
+      DefinitionSubstitutions:
+        ResultsBucket: !Ref ResultsBucket
+
+  StepfunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub states.${AWS::Region}.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              "StringEquals":
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: lambda
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: s3:List*
+                Resource: "*"
+                # Below is required for restore of objects and retriveval of metadata
+                # Because the bucket name is dynamic, this is open
+              - Effect: Allow
+                Action: 
+                  - s3:GetObject
+                  - s3:GetObjectAttributes
+                  - s3:RestoreObject
+                  - s3:PutObject
+                Resource: "*"
+              -   # Required to write to reesults of execution
+                  Effect: Allow
+                  Action:
+                      - s3:PutObject
+                      - s3:GetObject
+                      - s3:ListMultipartUploadParts
+                      - s3:AbortMultipartUpload
+                  Resource:
+                      - !Sub ${ResultsBucket.Arn}/*
+              - 
+                  Effect: Allow
+                  Action:
+                      - states:DescribeExecution
+                      - states:StopExecution
+                      - states:StartExecution
+                  # Role requires to kick off executions
+                  # Circular dependancy therefore using CFN Logical Id to create wildcard to scope down
+                  Resource: !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:GlacierMoverStepfunction*
+              - 
+                  Effect: Allow
+                  Action:
+                      - events:PutTargets
+                      - events:PutRule
+                      - events:DescribeRule
+                  Resource:
+                      - !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForStepFunctionsExecutionRule
+
+  ApplicationResourceGroup:
+    Type: AWS::ResourceGroups::Group
+    Properties:
+      Name: !Sub ApplicationInsights-SAM-${AWS::StackName}
+      ResourceQuery:
+        Type: CLOUDFORMATION_STACK_1_0
+  ApplicationInsightsMonitoring:
+    Type: AWS::ApplicationInsights::Application
+    Properties:
+      ResourceGroupName: !Ref ApplicationResourceGroup
+      AutoConfigurationEnabled: 'true'
+
+Outputs:
+  GlacierMoverStepfunctionArn:
+    Description: Arn to invoke stepfunction
+    Value: !GetAtt GlacierMoverStepfunction.Arn
+
