@@ -1,0 +1,172 @@
+{
+    "Comment": "Change objects from DEEP_ARCHIVE or GLACIER to STANDARD Storage",
+    "StartAt": "Get Results Bucket",
+    "States": {
+        "Get Results Bucket": {
+            "Type": "Pass",
+            "Next": "Get all S3 objects",
+            "ResultPath": "$.buckets",
+            "Parameters": {
+                "work_bucket.$": "$.bucket_name",
+                "results_bucket": "${ResultsBucket}"
+            }
+        },
+        "Get all S3 objects": {
+            "Type": "Map",
+            "ToleratedFailureCount": 10,
+            "ItemProcessor": {
+                "ProcessorConfig": {
+                    "Mode": "DISTRIBUTED",
+                    "ExecutionType": "EXPRESS"
+                },
+                "StartAt": "Required Action",
+                "States": {
+                    "Required Action": {
+                        "Type": "Choice",
+                        "Default": "Not Glacier",
+                        "Choices": [
+                            {
+                                "Or": [
+                                    {
+                                        "Variable": "$.object.StorageClass",
+                                        "StringEquals": "DEEP_ARCHIVE"
+                                    },
+                                    {
+                                        "Variable": "$.object.StorageClass",
+                                        "StringEquals": "GLACIER"
+                                    }
+                                ],
+                                "Next": "Check object properties"
+                            }
+                        ]
+                    },
+                    "Not Glacier": {
+                        "Type": "Succeed"
+                    },
+                    "Restore In Progress Already": {
+                        "Type": "Pass",
+                        "Parameters": {
+                            "status": "restore in progres"
+                        },
+                        "ResultPath": "$.status",
+                        "End": true
+                    },
+                    "Check object properties": {
+                        "Type": "Task",
+                        "Next": "Restore Required?",
+                        "Resource": "arn:aws:states:::aws-sdk:s3:headObject",
+                        "ResultPath": "$.head_object",
+                        "Retry": [ {
+                            "ErrorEquals": [ "S3.SdkClientException" ],
+                            "IntervalSeconds": 1,
+                            "BackoffRate": 2.0,
+                            "MaxAttempts": 2
+                        }
+                        ]
+                         ,
+                        "Parameters": {
+                            "Bucket.$": "$.destination_bucket",
+                            "Key.$": "$.object.Key"
+                        }
+                    },
+                    "Restore Required?": {
+                        "Type": "Choice",
+                        "Default": "Pre-Req restore from Glacier to allow permanent change",
+                        "Choices": [
+                            {
+                                "Variable": "$.head_object.Restore",
+                                "IsPresent": true,
+                                "Next": "Add Restore Attribute"
+                            }
+                        ]
+                    },
+                    "Add Restore Attribute": {
+                        "Comment": "Required as when restore is complete, there is a dynamic date after the ','",
+                        "Type": "Pass",
+                        "Next": "Restore In Progress?",
+                        "Parameters": {
+                            "status.$": "States.ArrayGetItem(States.StringSplit($.head_object.Restore, ','), 0)"
+                        },
+                        "ResultPath": "$.restore"
+                    },
+                    "Restore In Progress?": {
+                        "Type": "Choice",
+                        "Default": "Pre-Req restore from Glacier to allow permanent change",
+                        "Choices": [
+                            {
+                                "Variable": "$.restore.status",
+                                "StringEquals": "ongoing-request=\"true\"",
+                                "Next": "Restore In Progress Already"
+                            },
+                            {
+                                "Variable": "$.restore.status",
+                                "StringEquals": "ongoing-request=\"false\"",
+                                "Next": "Begin Copy (make another copy of the object to STANDARD storage)"
+                            }
+                        ]
+                    },
+                    "Pre-Req restore from Glacier to allow permanent change": {
+                        "Comment": "Restore operation does not return a value",
+                        "Type": "Task",
+                        "End": true,
+                        "Resource": "arn:aws:states:::aws-sdk:s3:restoreObject",
+                        "ResultPath": null,
+                        "Retry": [ {
+                            "ErrorEquals": [ "S3.SdkClientException" ],
+                            "IntervalSeconds": 1,
+                            "BackoffRate": 2.0,
+                            "MaxAttempts": 2
+                        }
+                        ],
+                        "Parameters": {
+                            "Bucket.$": "$.destination_bucket",
+                            "Key.$": "$.object.Key",
+                            "RestoreRequest": {
+                                "Days": 395,
+                                "GlacierJobParameters": {
+                                    "Tier": "Standard"
+                                }
+                            }
+                        }
+                    },
+                    "Begin Copy (make another copy of the object to STANDARD storage)": {
+                        "Comment": "Existing lifecyle rules will see GLACIER object be removed",
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::aws-sdk:s3:copyObject",
+                        "End": true,
+                        "ResultPath": "$.copy_request",
+                        "Parameters": {
+                            "CopySource.$": "States.Format('{}/{}', $.destination_bucket, $.object.Key)",
+                            "Bucket.$": "$.destination_bucket",
+                            "Key.$": "$.object.Key",
+                            "StorageClass": "STANDARD",
+                            "MetadataDirective": "REPLACE"
+                        }
+                    }
+                }
+            },
+            "ItemReader": {
+                "Resource": "arn:aws:states:::s3:listObjectsV2",
+                "Parameters": {
+                    "Bucket.$": "$.buckets.work_bucket"
+                },
+                "ReaderConfig": {
+                    "MaxItems": 0
+                }
+            },
+            "Label": "S3objectkeys",
+            "End": true,
+            "ItemSelector": {
+                "destination_bucket.$": "$.buckets.work_bucket",
+                "object.$": "$$.Map.Item.Value"
+            },
+            "ResultWriter": {
+                "Resource": "arn:aws:states:::s3:putObject",
+                "Parameters": {
+                    "Bucket.$": "$.buckets.results_bucket",
+                    "Prefix": "results"
+                }
+            }
+        }
+    }
+}
