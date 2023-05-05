@@ -17,4 +17,4 @@ lint-statemachine: # Lints the statemachine for syntax errors
 
 lint-yaml:
 	pipenv run yamllint *.yaml
-	pipenv run yamllint .github/workload/*.yml
+	pipenv run yamllint .github/workflows/*.yml
