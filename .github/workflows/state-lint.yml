@@ -1,8 +1,9 @@
 ---
 name: AWS States Lint
 
-on: 
-  pull_request:
+# Until statelint is fixed
+# https://github.com/awslabs/statelint/issues/51
+on: workflow-dispatch
 
 jobs:
   lint:
