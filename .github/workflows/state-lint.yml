@@ -3,7 +3,7 @@ name: AWS States Lint
 
 # Until statelint is fixed
 # https://github.com/awslabs/statelint/issues/51
-on: workflow-dispatch
+on: workflow_dispatch
 
 jobs:
   lint:
